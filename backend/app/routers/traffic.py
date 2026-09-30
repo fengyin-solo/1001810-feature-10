@@ -1,18 +1,19 @@
-"""占道许可接口：维护占道许可，覆盖提交审批、确认批准、确认恢复等动作。"""
+"""占道许可接口：维护占道许可，覆盖提交审批、确认批准、确认恢复、整表导入与清单导出。"""
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
-from app.schemas import ActionResult, EntryPayload, PageResult
+from app.schemas import ActionResult, EntryPayload, ImportResult, PageResult
 from app.services.traffic import TrafficService
+from app.sheet_io import SheetParseError, parse_sheet
 
 router = APIRouter(prefix="/api/traffic", tags=["占道许可"])
 
 service = TrafficService()
 
-LIST_FIELDS = ["许可编号", "申请单位", "占道位置", "占道面积", "起止日期", "审批人员", "恢复期限", "许可状态"]
+LIST_FIELDS = ["许可编号", "申请单位", "占道位置", "占道面积", "起止日期", "审批人员", "恢复期限", "许可状态", "备注"]
 STATUSES = ["待审批", "已批准", "施工中", "已恢复"]
 
 
@@ -28,6 +29,41 @@ def list_entries(
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.post("/import", response_model=ImportResult)
+async def import_entries(file: UploadFile = File(..., description="占道许可表格，.xlsx 或 .csv")) -> ImportResult:
+    """整表导入占道许可：逐行匹配处理，成功的直接落库，对不上或不能更新的行在结果里标原因。"""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传的文件是空的，请确认表格内容后重试")
+    try:
+        raw_rows = parse_sheet(content, file.filename or "")
+    except SheetParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    present = set().union(*(row.keys() for row in raw_rows)) if raw_rows else set()
+    missing_headers = [
+        field for field in ("许可编号", "申请单位", "占道位置") if field not in present
+    ]
+    if missing_headers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"表头缺少必填列：{'、'.join(missing_headers)}，请按占道许可清单的表头整理",
+        )
+
+    outcome = service.import_rows(raw_rows)
+    return ImportResult(**outcome)
+
+
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按许可编号检索，与列表一致"),
+    status: str | None = Query(default=None, description="待审批、已批准、施工中、已恢复"),
+) -> dict[str, Any]:
+    """导出占道许可清单：范围与列表当前的关键字、状态过滤条件保持一致。"""
+    items, total = service.list_entries(keyword=keyword, status=status, page=1, size=10000)
+    return {"module": "traffic", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +92,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出占道许可清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "traffic", "total": total, "items": items}

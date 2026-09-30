@@ -21,6 +21,28 @@ class ActionResult(BaseModel):
     entry: dict[str, Any] | None = None
 
 
+class ImportFailure(BaseModel):
+    """批量导入中未处理的一行：行号、原因与该行原始内容。"""
+
+    line: int
+    reason: str
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class ImportResult(BaseModel):
+    """整表导入的逐行处理结果；成功部分已落库，失败行在这里标原因。"""
+
+    ok: bool = True
+    total: int = 0
+    created: int = 0
+    updated: int = 0
+    noted: int = 0
+    unchanged: int = 0
+    failed: int = 0
+    summary: str
+    failures: list[ImportFailure] = Field(default_factory=list)
+
+
 class EntryPayload(BaseModel):
     """登记或修改一条业务记录时提交的字段集合。"""
 
